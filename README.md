@@ -19,7 +19,7 @@ go get github.com/atoncooper/fastcache
 ### 初始化缓存
 ~~~go
 import "github.com/atoncooper/fastcache/src"
-cache := NewFastCache()
+cache := src.NewFastCache()
 ~~~
 ### 多缓存项目
 ~~~go
