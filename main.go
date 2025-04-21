@@ -1,8 +1,8 @@
 package main
 
 import (
-	"fast-cache/src"
 	"fmt"
+	"github.com/atoncooper/fastcache/src"
 )
 
 func main() {
