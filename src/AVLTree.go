@@ -63,28 +63,28 @@ func (tree *AVLTree) getBalance(node *Node) int {
 func (tree *AVLTree) rotateLeft(z *Node) *Node {
 	y := z.Right
 	T2 := z.Left
-	y.Left = z   // 将 z 设置为 y 的左子节点
-	z.Right = T2 // 将 T2 设置为 z 的右子节点
+	y.Left = z   // Set z as y's left child
+	z.Right = T2 // Set T2 as z's right child
 
-	z.Height = 1 + max(tree.getHeight(z.Left), tree.getHeight(z.Right)) // 更新 z 的高度
-	y.Height = 1 + max(tree.getHeight(y.Left), tree.getHeight(y.Right)) // 更新 y 的高度
+	z.Height = 1 + max(tree.getHeight(z.Left), tree.getHeight(z.Right)) // Update z's height
+	y.Height = 1 + max(tree.getHeight(y.Left), tree.getHeight(y.Right)) // Update y's height
 
-	return y // 返回新的根节点 y
+	return y // Return new root node y
 }
 func (tree *AVLTree) rotateRight(z *Node) *Node {
-	y := z.Left   // y 是 z 的左子节点
-	T3 := y.Right // T3 是 y 的右子树
+	y := z.Left   // y is z's left child
+	T3 := y.Right // T3 is y's right subtree
 
-	y.Right = z // 将 z 设置为 y 的右子节点
-	z.Left = T3 // 将 T3 设置为 z 的左子节点
+	y.Right = z // Set z as y's right child
+	z.Left = T3 // Set T3 as z's left child
 
-	z.Height = 1 + max(tree.getHeight(z.Left), tree.getHeight(z.Right)) // 更新 z 的高度
-	y.Height = 1 + max(tree.getHeight(y.Left), tree.getHeight(y.Right)) // 更新 y 的高度
+	z.Height = 1 + max(tree.getHeight(z.Left), tree.getHeight(z.Right)) // Update z's height
+	y.Height = 1 + max(tree.getHeight(y.Left), tree.getHeight(y.Right)) // Update y's height
 
-	return y // 返回新的根节点 y
+	return y // Return new root node y
 }
 
-// 查找节点
+// Find finds a node.
 func (tree *AVLTree) Find(key int) (any, bool) {
 	return tree.findNode(tree.Root, key)
 }
@@ -102,7 +102,7 @@ func (tree *AVLTree) findNode(node *Node, key int) (any, bool) {
 	return tree.findNode(node.Right, key)
 }
 
-// 删除节点
+// Delete deletes a node.
 func (tree *AVLTree) Delete(key int) {
 	tree.Root = tree.deleteNode(tree.Root, key)
 }
@@ -116,14 +116,14 @@ func (tree *AVLTree) deleteNode(node *Node, key int) *Node {
 	} else if key > node.Key {
 		node.Right = tree.deleteNode(node.Right, key)
 	} else {
-		// 找到要删除的节点
+		// Find the node to delete
 		if node.Left == nil {
 			return node.Right
 		} else if node.Right == nil {
 			return node.Left
 		}
 
-		// 找到右子树的最小值节点
+		// Find the minimum node in the right subtree
 		minNode := tree.findMin(node.Right)
 		node.Key = minNode.Key
 		node.Value = minNode.Value
@@ -136,7 +136,7 @@ func (tree *AVLTree) deleteNode(node *Node, key int) *Node {
 	return tree.balance(node)
 }
 
-// 找到以node为根的子树的最小值节点
+// findMin finds the minimum node in the subtree rooted at node.
 func (tree *AVLTree) findMin(node *Node) *Node {
 	for node.Left != nil {
 		node = node.Left

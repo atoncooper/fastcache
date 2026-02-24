@@ -5,13 +5,15 @@ import (
 	"encoding/hex"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 type ValueLink struct {
-	Key   string
-	value any
-	Next  *ValueLink
+	Key        string
+	value      any
+	refCount   int    // Reference count
+	Next       *ValueLink
 }
 
 type RowValueLinkList struct {
@@ -43,11 +45,24 @@ func (r *RowValueLinkList) find(key string) any {
 	return nil
 }
 
+// findNode finds a node and returns the pointer.
+func (r *RowValueLinkList) findNode(key string) *ValueLink {
+	c := r.Head
+	for c != nil {
+		if c.Key == key {
+			return c
+		}
+		c = c.Next
+	}
+	return nil
+}
+
 func (r *RowValueLinkList) addWithKey(key string, value any) {
 	node := &ValueLink{
-		Key:   key,
-		value: value,
-		Next:  r.Head,
+		Key:      key,
+		value:    value,
+		refCount: 1,
+		Next:     r.Head,
 	}
 	r.Head = node
 }
@@ -71,10 +86,15 @@ func (r *RowValueLinkList) delete(key string) bool {
 	return false
 }
 
+var keyIdCounter int64
+
 func createKeyId() string {
+	// Use atomic counter to ensure uniqueness
+	count := atomic.AddInt64(&keyIdCounter, 1)
 	now := time.Now().UnixNano()
 	h := sha1.New()
 	h.Write([]byte(strconv.FormatInt(now, 10)))
+	h.Write([]byte(strconv.FormatInt(count, 10)))
 	return hex.EncodeToString(h.Sum(nil))[:8]
 }
 
@@ -91,7 +111,7 @@ type HashMapValueBucket struct {
 }
 
 func (h *HashMapValueBucket) setValue(key string, value any) {
-	// 计算key的hash索引值
+	// Calculate key's hash index value
 	index := HashKey(key, h.size)
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -107,22 +127,22 @@ func (h *HashMapValueBucket) setValue(key string, value any) {
 	}
 }
 
-// getValue 获取value
+// getValue retrieves the value.
 //
-// key : 存储的key
-// return : value 返回实际的value值
+// key: The stored key
+// return: The actual value
 func (h *HashMapValueBucket) getValue(key string) any {
 	index := HashKey(key, h.size)
 	return h.table[index].find(key)
 }
 
-// DeleteValue 删除value
+// DeleteValue deletes the value.
 //
-// key : 存储的key
-// return : bool 返回是否删除成功
+// key: The stored key
+// return: bool, returns true if deletion was successful
 //
-//	true : 删除成功
-//	false : 删除失败
+//	true: Delete successful
+//	false: Delete failed
 func (h *HashMapValueBucket) DeleteValue(key string) bool {
 	index := HashKey(key, h.size)
 
@@ -140,20 +160,51 @@ func (h *HashMapValueBucket) DeleteValue(key string) bool {
 	return ok
 }
 
-// startExpansion 启动扩容
+// incrRefCount increments the reference count.
+func (h *HashMapValueBucket) incrRefCount(key string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	index := HashKey(key, h.size)
+	node := h.table[index].findNode(key)
+	if node != nil {
+		node.refCount++
+	}
+}
+
+// decrRefCount decrements reference count and returns whether value should be deleted.
+func (h *HashMapValueBucket) decrRefCount(key string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	index := HashKey(key, h.size)
+	node := h.table[index].findNode(key)
+	if node == nil {
+		return false
+	}
+	node.refCount--
+	if node.refCount <= 0 {
+		h.table[index].delete(key)
+		h.count--
+		return true
+	}
+	return false
+}
+
+// startExpansion starts the hash table expansion.
 func (h *HashMapValueBucket) startExpansion() {
 	if h.oldTable != nil {
-		// 已存在扩容中
+		// Already expanding
 		return
 	}
 	h.oldTable = h.table
 	h.size = h.size * 2
 	h.table = make([]RowValueLinkList, h.size)
-	// 初始化index
+	// Initialize index
 	h.rehashIndex = 0
 }
 
-// doReHashStep 执行扩容步骤
+// doReHashStep performs one step of the expansion.
 func (h *HashMapValueBucket) doReHashStep() {
 	if h.oldTable == nil {
 		return
@@ -172,7 +223,7 @@ func (h *HashMapValueBucket) doReHashStep() {
 				}
 				h.table[index].addWithKey(c.Key, c.value)
 			}
-			h.rehashIndex = i + 1 // 下次从下一个桶位开始
+			h.rehashIndex = i + 1 // Next time start from next bucket
 			break
 		}
 	}
@@ -211,7 +262,7 @@ func (sc *ShardedCacheValue) getShard(key string) *HashMapValueBucket {
 }
 
 func (sc *ShardedCacheValue) SetValue(value any) string {
-	// 将值存入指定的分片
+	// Store value in the specified shard
 	key := createKeyId()
 	shard := sc.getShard(key)
 	shard.setValue(key, value)
@@ -226,4 +277,16 @@ func (sc *ShardedCacheValue) GetValue(key string) any {
 func (sc *ShardedCacheValue) DeleteValue(key string) bool {
 	shard := sc.getShard(key)
 	return shard.DeleteValue(key)
+}
+
+// IncrRefCount increments the reference count.
+func (sc *ShardedCacheValue) IncrRefCount(key string) {
+	shard := sc.getShard(key)
+	shard.incrRefCount(key)
+}
+
+// DecrRefCount decrements reference count and returns whether value should be deleted.
+func (sc *ShardedCacheValue) DecrRefCount(key string) bool {
+	shard := sc.getShard(key)
+	return shard.decrRefCount(key)
 }

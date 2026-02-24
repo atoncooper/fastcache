@@ -14,6 +14,7 @@ type KeyLink struct {
 	value    string
 	ExpireAt int64
 	Start    int64
+	LastAccess int64  // Last access time, used for LRU
 	Next     *KeyLink
 }
 
@@ -27,12 +28,13 @@ func NewKLL() *KeyLinkList {
 
 func (k *KeyLinkList) add(key string, value string, exp int64) {
 	node := &KeyLink{
-		Key:      key,
-		value:    value,
-		Start:    0,
-		ExpireAt: exp,
+		Key:        key,
+		value:      value,
+		Start:      time.Now().UnixNano(),
+		LastAccess: time.Now().UnixNano(),
+		ExpireAt:   exp,
 	}
-	// 头插法
+	// Head insertion method
 	node.Next = k.Head
 	k.Head = node
 }
@@ -41,7 +43,7 @@ func (k *KeyLinkList) find(key string) (string, bool) {
 	c := k.Head
 	for c != nil {
 		if c.Key == key {
-			// 检查是否过期
+			// Check if expired
 			if time.Now().UnixNano() > c.ExpireAt {
 				return "", false
 			}
@@ -88,7 +90,7 @@ func NewHashMapAKBucket() *HashMapAkBucket {
 	}
 }
 
-// set 插入一个key-value-expire项
+// set inserts a key-value-expire item.
 func (h *HashMapAkBucket) set(key string, value string, exp int64) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -101,13 +103,13 @@ func (h *HashMapAkBucket) set(key string, value string, exp int64) error {
 
 	index := HashKey(key, h.size)
 
-	// 插入链表
+	// Insert into linked list
 	h.table[index].add(key, value, exp)
 	h.count++
 	return nil
 }
 
-// get 获取值
+// get retrieves the value.
 func (h *HashMapAkBucket) get(key string) (string, bool) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -121,12 +123,13 @@ func (h *HashMapAkBucket) get(key string) (string, bool) {
 	for node != nil {
 		if node.Key == key {
 			if now > node.ExpireAt {
-				// 不能在 RLock 下调用 delete，延迟处理
-				go h.delete(key) // 异步清理
+				// Mark for deletion, don't call delete under read lock
 				return "", false
 			}
 			value = node.value
 			ok = true
+			// Update last access time
+			node.LastAccess = now
 			break
 		}
 		node = node.Next
@@ -134,7 +137,14 @@ func (h *HashMapAkBucket) get(key string) (string, bool) {
 	return value, ok
 }
 
-// delete 删除key
+// deleteExpired deletes expired keys (internal use, requires write lock).
+func (h *HashMapAkBucket) deleteExpired(key string) {
+	index := HashKey(key, h.size)
+	h.table[index].delete(key)
+	h.count--
+}
+
+// delete deletes the key.
 func (h *HashMapAkBucket) delete(key string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -144,7 +154,7 @@ func (h *HashMapAkBucket) delete(key string) {
 	h.count--
 }
 
-// Rehash 启动扩容
+// startExpansion initiates hash table expansion.
 func (h *HashMapAkBucket) startExpansion() {
 	if h.oldTable != nil {
 		return
@@ -155,7 +165,7 @@ func (h *HashMapAkBucket) startExpansion() {
 	h.rehashIndex = 0
 }
 
-// doReHashStep 搬运一步
+// doReHashStep migrates one step.
 func (h *HashMapAkBucket) doReHashStep() {
 	if h.oldTable == nil {
 		return
@@ -170,7 +180,7 @@ func (h *HashMapAkBucket) doReHashStep() {
 			node = next
 		}
 		h.rehashIndex = i + 1
-		break // 每次只处理一个 bucket，可调节步长
+		break // Only process one bucket each time, step size can be adjusted
 	}
 	if h.rehashIndex >= len(h.oldTable) {
 		h.oldTable = nil
@@ -178,15 +188,15 @@ func (h *HashMapAkBucket) doReHashStep() {
 	}
 }
 
-// HashKey 哈希函数
+// HashKey is a hash function.
 func HashKey(key string, size int) int {
 	h := fnv.New32a()
 	h.Write([]byte(key))
-	hash := int(h.Sum32() & 0x7fffffff) // 保证正数
+	hash := int(h.Sum32() & 0x7fffffff) // Ensure positive
 	return hash % size
 }
 
-// startGC 启动协程定期清理过期键
+// startGC launches a goroutine to periodically clean expired keys.
 func (h *HashMapAkBucket) startGC(interval time.Duration) {
 	go func() {
 		ticker := time.NewTicker(interval)
@@ -216,7 +226,7 @@ func (h *HashMapAkBucket) startGC(interval time.Duration) {
 				}
 			}
 
-			// 清理 oldTable 里的（如果正在扩容）
+			// Clean up oldTable (if expanding)
 			if h.oldTable != nil {
 				for i := 0; i < len(h.oldTable); i++ {
 					prev := (*KeyLink)(nil)
@@ -281,4 +291,56 @@ func (sc *ShardedCache) StartGC(interval time.Duration) {
 	for _, shard := range sc.shards {
 		shard.startGC(interval)
 	}
+}
+
+// EvictOne evicts one least recently used key, returns evicted key.
+func (sc *ShardedCache) EvictOne() string {
+	// Randomly select a shard
+	for i := 0; i < sc.shardCount; i++ {
+		shard := sc.shards[i]
+		evicted := shard.evictOne()
+		if evicted != "" {
+			return evicted
+		}
+	}
+	return ""
+}
+
+// evictOne evicts one least recently used key from current shard.
+func (h *HashMapAkBucket) evictOne() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	now := time.Now().UnixNano()
+	var oldestKey string
+	var oldestTime int64 = now + 1
+
+	// Iterate through all buckets, find the oldest non-expired key
+	for i := 0; i < len(h.table); i++ {
+		node := h.table[i].Head
+		for node != nil {
+			if node.ExpireAt > now && node.LastAccess < oldestTime {
+				oldestTime = node.LastAccess
+				oldestKey = node.Key
+			}
+			node = node.Next
+		}
+	}
+
+	if oldestKey != "" {
+		index := HashKey(oldestKey, h.size)
+		h.table[index].delete(oldestKey)
+		h.count--
+	}
+
+	return oldestKey
+}
+
+// Count returns the current number of keys.
+func (sc *ShardedCache) Count() int64 {
+	var total int64
+	for _, shard := range sc.shards {
+		total += shard.count
+	}
+	return total
 }

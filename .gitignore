@@ -3,3 +3,8 @@
 *.a
 *.idea/
 test/
+bug.md
+.claude/*
+.claude/
+TODO.md
+todo.md
